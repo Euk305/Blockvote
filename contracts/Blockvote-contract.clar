@@ -58,3 +58,45 @@
 ;; Private helper functions
 (define-private (is-contract-admin)
   (is-eq tx-sender (var-get contract-admin)))
+
+;; Public functions
+
+;; Voter Registration Functions
+(define-public (register-voter)
+  (let ((voter-info (map-get? voters {voter: tx-sender})))
+    (if (is-some voter-info)
+        err-already-exists
+        (begin
+          (map-set voters 
+            {voter: tx-sender}
+            {registered: true, registration-block: block-height})
+          (ok "Voter registered successfully")))))
+
+(define-public (unregister-voter (voter principal))
+  (if (is-contract-admin)
+      (let ((voter-info (map-get? voters {voter: voter})))
+        (if (is-some voter-info)
+            (begin
+              (map-delete voters {voter: voter})
+              (ok "Voter unregistered successfully"))
+            err-not-found))
+      err-unauthorized))
+
+(define-public (update-admin (new-admin principal))
+  (if (is-contract-admin)
+      (begin
+        (var-set contract-admin new-admin)
+        (ok "Admin updated successfully"))
+      err-unauthorized))
+
+;; Read-only functions for voter queries
+(define-read-only (get-voter-info (voter principal))
+  (map-get? voters {voter: voter}))
+
+(define-read-only (get-voter-registration-block (voter principal))
+  (match (map-get? voters {voter: voter})
+    voter-data (some (get registration-block voter-data))
+    none))
+
+(define-read-only (is-admin (user principal))
+  (is-eq user (var-get contract-admin)))
