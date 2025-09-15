@@ -718,3 +718,568 @@ Clarinet.test({
     // This would be caught during contract compilation, not runtime
   },
 });
+
+Clarinet.test({
+  name: 'BlockVote - Vote Casting Functionality',
+  async fn(chain: Chain, accounts: Map<string, Account>) {
+    const wallet1 = accounts.get('wallet_1')!;
+    const wallet2 = accounts.get('wallet_2')!;
+    const wallet3 = accounts.get('wallet_3')!;
+
+    // Setup: Register voters and create a ballot
+    let block = chain.mineBlock([
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet1.address),
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet2.address),
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet3.address),
+      Tx.contractCall(
+        'Blockvote-contract',
+        'create-ballot',
+        [
+          types.ascii('Test Election'),
+          types.ascii('Choose your preferred option'),
+          types.list([
+            types.ascii('Option A'),
+            types.ascii('Option B'),
+            types.ascii('Option C')
+          ]),
+          types.uint(100)
+        ],
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Voter registered successfully")');
+    assertEquals(block.receipts[1].result, '(ok "Voter registered successfully")');  
+    assertEquals(block.receipts[2].result, '(ok "Voter registered successfully")');
+    assertEquals(block.receipts[3].result, '(ok u1)'); // Ballot created
+
+    // Test 1: Should allow registered voter to cast vote
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(0)], // Vote for Option A (index 0)
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Vote cast successfully")');
+
+    // Verify vote was recorded
+    let readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'has-voter-voted',
+      [types.uint(1), types.principal(wallet1.address)],
+      wallet1.address
+    );
+    assertEquals(readOnlyResult.result, 'true');
+
+    // Verify voter's choice
+    readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-voter-choice',
+      [types.uint(1), types.principal(wallet1.address)],
+      wallet1.address
+    );
+    let voterChoice = readOnlyResult.result.expectSome().expectTuple() as any;
+    assertEquals(voterChoice['option-index'], 'u0');
+
+    // Test 2: Should prevent unregistered voter from voting
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(1)],
+        accounts.get('wallet_4')!.address // Not registered
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u102)'); // Unauthorized error
+
+    // Test 3: Should prevent double voting
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(1)],
+        wallet1.address // Already voted
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u104)'); // Already voted error
+
+    // Test 4: Should validate option index bounds
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(5)], // Invalid option index (only 0, 1, 2 exist)
+        wallet2.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u106)'); // Invalid option error
+
+    // Test 5: Should allow multiple voters to vote for different options
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(1)], // Vote for Option B
+        wallet2.address
+      ),
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(2)], // Vote for Option C
+        wallet3.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Vote cast successfully")');
+    assertEquals(block.receipts[1].result, '(ok "Vote cast successfully")');
+
+    // Verify all votes were cast
+    assertEquals(
+      chain.callReadOnlyFn('Blockvote-contract', 'has-voter-voted', [types.uint(1), types.principal(wallet1.address)], wallet1.address).result,
+      'true'
+    );
+    assertEquals(
+      chain.callReadOnlyFn('Blockvote-contract', 'has-voter-voted', [types.uint(1), types.principal(wallet2.address)], wallet2.address).result,
+      'true'
+    );
+    assertEquals(
+      chain.callReadOnlyFn('Blockvote-contract', 'has-voter-voted', [types.uint(1), types.principal(wallet3.address)], wallet3.address).result,
+      'true'
+    );
+
+    // Test 6: Should prevent voting on non-existent ballot
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(999), types.uint(0)],
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u101)'); // Not found error
+  },
+});
+
+Clarinet.test({
+  name: 'BlockVote - Vote Changing Functionality',
+  async fn(chain: Chain, accounts: Map<string, Account>) {
+    const wallet1 = accounts.get('wallet_1')!;
+    const wallet2 = accounts.get('wallet_2')!;
+
+    // Setup: Register voters, create ballot, and cast initial votes
+    let block = chain.mineBlock([
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet1.address),
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet2.address),
+      Tx.contractCall(
+        'Blockvote-contract',
+        'create-ballot',
+        [
+          types.ascii('Changeable Vote Test'),
+          types.ascii('Test vote changing functionality'),
+          types.list([
+            types.ascii('First Choice'),
+            types.ascii('Second Choice'),
+            types.ascii('Third Choice')
+          ]),
+          types.uint(100)
+        ],
+        wallet1.address
+      ),
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(0)], // Initially vote for First Choice
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[3].result, '(ok "Vote cast successfully")');
+
+    // Test 1: Should allow voter to change their vote
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(1), types.uint(2)], // Change to Third Choice
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Vote changed successfully")');
+
+    // Verify vote was changed
+    let readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-voter-choice',
+      [types.uint(1), types.principal(wallet1.address)],
+      wallet1.address
+    );
+    let voterChoice = readOnlyResult.result.expectSome().expectTuple() as any;
+    assertEquals(voterChoice['option-index'], 'u2'); // Should now be Third Choice
+
+    // Test 2: Should prevent unregistered voter from changing vote
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(1), types.uint(1)],
+        accounts.get('wallet_3')!.address // Not registered
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u102)'); // Unauthorized error
+
+    // Test 3: Should prevent changing vote if no previous vote exists
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(1), types.uint(1)],
+        wallet2.address // Registered but hasn't voted yet
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u101)'); // Not found error
+
+    // Test 4: Should validate new option index bounds
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(1), types.uint(5)], // Invalid option index
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u106)'); // Invalid option error
+
+    // Test 5: Should prevent changing to the same option
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(1), types.uint(2)], // Already voting for Third Choice (index 2)
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u205)'); // Same option error
+
+    // Test 6: Should prevent voting on non-existent ballot
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(999), types.uint(0)],
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u101)'); // Not found error
+  },
+});
+
+Clarinet.test({
+  name: 'BlockVote - Voting on Inactive/Ended Ballots',
+  async fn(chain: Chain, accounts: Map<string, Account>) {
+    const deployer = accounts.get('deployer')!;
+    const wallet1 = accounts.get('wallet_1')!;
+
+    // Setup: Register voter and create ballots
+    let block = chain.mineBlock([
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet1.address),
+      Tx.contractCall(
+        'Blockvote-contract',
+        'create-ballot',
+        [
+          types.ascii('Short Ballot'),
+          types.ascii('This ballot will expire'),
+          types.list([types.ascii('Yes'), types.ascii('No')]),
+          types.uint(3) // Very short duration
+        ],
+        wallet1.address
+      ),
+      Tx.contractCall(
+        'Blockvote-contract',
+        'create-ballot',
+        [
+          types.ascii('Deactivated Ballot'),
+          types.ascii('This ballot will be deactivated'),
+          types.list([types.ascii('Agree'), types.ascii('Disagree')]),
+          types.uint(100)
+        ],
+        wallet1.address
+      ),
+    ]);
+
+    // Test 1: Should prevent voting on expired ballot
+    // First, let's vote on the short ballot before it expires
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(0)], // Vote while ballot is still active
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Vote cast successfully")');
+
+    // Now mine blocks to exceed ballot duration and try to change vote
+    chain.mineEmptyBlock(4);
+
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(1), types.uint(1)], // Try to change vote on expired ballot
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u107)'); // Ballot ended error
+
+    // Test 2: Should prevent voting on deactivated ballot
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'deactivate-ballot',
+        [types.uint(2)],
+        deployer.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Ballot deactivated successfully")');
+
+    // Now try to vote on the deactivated ballot
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(2), types.uint(0)], // Try to vote on deactivated ballot
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u105)'); // Ballot inactive error
+
+    // Test 3: Should prevent changing vote on ended ballot
+    // Already tested above with change-vote after expiration
+
+    // Test 4: Should prevent voting on new voter after ballot expires
+    // Register a new voter and try to vote on expired ballot
+    block = chain.mineBlock([
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], accounts.get('wallet_5')!.address),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Voter registered successfully")');
+
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(1), types.uint(0)], // Try to vote on expired ballot as new voter
+        accounts.get('wallet_5')!.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u107)'); // Ballot ended error
+
+    // Test 4: Should prevent changing vote on deactivated ballot
+    // First create a new active ballot and vote on it
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'create-ballot',
+        [
+          types.ascii('Test Ballot 3'),
+          types.ascii('For testing deactivation and vote changing'),
+          types.list([types.ascii('Yes'), types.ascii('No')]),
+          types.uint(100)
+        ],
+        deployer.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok u3)'); // Third ballot created
+
+    // Vote on the new ballot
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'cast-vote',
+        [types.uint(3), types.uint(0)], // Vote on ballot 3
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Vote cast successfully")');
+
+    // Deactivate the ballot
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'deactivate-ballot',
+        [types.uint(3)],
+        deployer.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Ballot deactivated successfully")');
+
+    // Now try to change vote on deactivated ballot
+    block = chain.mineBlock([
+      Tx.contractCall(
+        'Blockvote-contract',
+        'change-vote',
+        [types.uint(3), types.uint(1)], // Try to change vote on deactivated ballot
+        wallet1.address
+      ),
+    ]);
+
+    assertEquals(block.receipts[0].result, '(err u105)'); // Ballot inactive error
+  },
+});
+
+Clarinet.test({
+  name: 'BlockVote - Complex Voting Scenarios',
+  async fn(chain: Chain, accounts: Map<string, Account>) {
+    const deployer = accounts.get('deployer')!;
+    const wallet1 = accounts.get('wallet_1')!;
+    const wallet2 = accounts.get('wallet_2')!;
+    const wallet3 = accounts.get('wallet_3')!;
+    const wallet4 = accounts.get('wallet_4')!;
+
+    // Setup: Register multiple voters and create a complex ballot
+    let block = chain.mineBlock([
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet1.address),
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet2.address),
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet3.address),
+      Tx.contractCall('Blockvote-contract', 'register-voter', [], wallet4.address),
+      Tx.contractCall(
+        'Blockvote-contract',
+        'create-ballot',
+        [
+          types.ascii('Multi-Option Election'),
+          types.ascii('Complex voting scenario with multiple options'),
+          types.list([
+            types.ascii('Candidate Alpha'),
+            types.ascii('Candidate Beta'),
+            types.ascii('Candidate Gamma'),
+            types.ascii('Candidate Delta'),
+            types.ascii('Abstain')
+          ]),
+          types.uint(200)
+        ],
+        deployer.address
+      ),
+    ]);
+
+    // All registrations and ballot creation should succeed
+    for (let i = 0; i < 5; i++) {
+      if (i < 4) {
+        assertEquals(block.receipts[i].result, '(ok "Voter registered successfully")');
+      } else {
+        assertEquals(block.receipts[i].result, '(ok u1)'); // Ballot created
+      }
+    }
+
+    // Test 1: Multiple voters casting votes for different options
+    block = chain.mineBlock([
+      Tx.contractCall('Blockvote-contract', 'cast-vote', [types.uint(1), types.uint(0)], wallet1.address), // Alpha
+      Tx.contractCall('Blockvote-contract', 'cast-vote', [types.uint(1), types.uint(1)], wallet2.address), // Beta
+      Tx.contractCall('Blockvote-contract', 'cast-vote', [types.uint(1), types.uint(0)], wallet3.address), // Alpha
+      Tx.contractCall('Blockvote-contract', 'cast-vote', [types.uint(1), types.uint(4)], wallet4.address), // Abstain
+    ]);
+
+    // All votes should succeed
+    for (let i = 0; i < 4; i++) {
+      assertEquals(block.receipts[i].result, '(ok "Vote cast successfully")');
+    }
+
+    // Test 2: Verify ballot total vote count increased
+    let readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-ballot-info',
+      [types.uint(1)],
+      deployer.address
+    );
+    let ballotInfo = readOnlyResult.result.expectSome().expectTuple() as any;
+    assertEquals(ballotInfo['total-votes'], 'u4'); // 4 total votes cast
+
+    // Test 3: Vote changing scenario
+    block = chain.mineBlock([
+      Tx.contractCall('Blockvote-contract', 'change-vote', [types.uint(1), types.uint(2)], wallet2.address), // Beta -> Gamma
+    ]);
+
+    assertEquals(block.receipts[0].result, '(ok "Vote changed successfully")');
+
+    // Verify total votes didn't increase (change, not new vote)
+    readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-ballot-info',
+      [types.uint(1)],
+      deployer.address
+    );
+    ballotInfo = readOnlyResult.result.expectSome().expectTuple() as any;
+    assertEquals(ballotInfo['total-votes'], 'u4'); // Still 4 total votes
+
+    // Test 4: Verify individual vote counts
+    readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-vote-count',
+      [types.uint(1), types.uint(0)], // Alpha votes
+      deployer.address
+    );
+    assertEquals(readOnlyResult.result, 'u2'); // wallet1 and wallet3
+
+    readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-vote-count',
+      [types.uint(1), types.uint(1)], // Beta votes
+      deployer.address
+    );
+    assertEquals(readOnlyResult.result, 'u0'); // wallet2 changed away from Beta
+
+    readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-vote-count',
+      [types.uint(1), types.uint(2)], // Gamma votes
+      deployer.address
+    );
+    assertEquals(readOnlyResult.result, 'u1'); // wallet2 changed to Gamma
+
+    readOnlyResult = chain.callReadOnlyFn(
+      'Blockvote-contract',
+      'get-vote-count',
+      [types.uint(1), types.uint(4)], // Abstain votes
+      deployer.address
+    );
+    assertEquals(readOnlyResult.result, 'u1'); // wallet4
+
+    // Test 5: Verify has-voted status for all voters
+    assertEquals(
+      chain.callReadOnlyFn('Blockvote-contract', 'has-voter-voted', [types.uint(1), types.principal(wallet1.address)], wallet1.address).result,
+      'true'
+    );
+    assertEquals(
+      chain.callReadOnlyFn('Blockvote-contract', 'has-voter-voted', [types.uint(1), types.principal(wallet2.address)], wallet2.address).result,
+      'true'
+    );
+    assertEquals(
+      chain.callReadOnlyFn('Blockvote-contract', 'has-voter-voted', [types.uint(1), types.principal(wallet3.address)], wallet3.address).result,
+      'true'
+    );
+    assertEquals(
+      chain.callReadOnlyFn('Blockvote-contract', 'has-voter-voted', [types.uint(1), types.principal(wallet4.address)], wallet4.address).result,
+      'true'
+    );
+  },
+});
