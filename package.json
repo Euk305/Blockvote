@@ -1,0 +1,30 @@
+{
+  "name": "blockvote",
+  "version": "1.0.0",
+  "description": "A secure, transparent, and tamper-proof blockchain voting system built on the Stacks blockchain using Clarity smart contracts.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "clarinet test",
+    "test:watch": "clarinet test --watch",
+    "check": "clarinet check"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Euk305/Blockvote.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Euk305/Blockvote/issues"
+  },
+  "homepage": "https://github.com/Euk305/Blockvote#readme",
+  "devDependencies": {
+    "@hirosystems/clarinet-sdk": "^3.6.1",
+    "vitest": "^3.2.4"
+  }
+}
